@@ -1,0 +1,64 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    
+    - uses: actions/checkout@master
+    
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create ACR
+      id: create-acr
+      run: |
+        az acr create -n votingappjv1971 -g votingappjv1971b359-rg --location "East US" --sku Standard --admin-enabled
+        echo "::set-output name=acr_username::`az acr credential show -n votingappjv1971 --query username | xargs`"
+        echo "::set-output name=acr_password::`az acr credential show -n votingappjv1971 --query passwords[0].value | xargs`"
+        echo "::add-mask::`az acr credential show -n votingappjv1971 --query passwords[0].value | xargs`"
+
+    - uses: azure/docker-login@v1
+      with:
+        login-server: votingappjv1971.azurecr.io
+        username: ${{ steps.create-acr.outputs.acr_username }}
+        password: ${{ steps.create-acr.outputs.acr_password }}
+
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/azure-vote" -f  "azure-vote/Dockerfile" -t votingappjv1971.azurecr.io/aks01:${{ github.sha }} --label dockerfile-path=azure-vote/Dockerfile
+        docker push votingappjv1971.azurecr.io/aks01:${{ github.sha }}
+    
+    - uses: azure/k8s-set-context@v1
+      id: login
+      with:
+         kubeconfig: ${{ secrets.aks_aks01_kubeConfig }}
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep aks018128 | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace aks018128`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: aks018128
+        container-registry-url: votingappjv1971.azurecr.io
+        container-registry-username: ${{ steps.create-acr.outputs.acr_username }}
+        container-registry-password: ${{ steps.create-acr.outputs.acr_password }}
+        secret-name: aks01dockerauth
+       
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: aks018128
+        manifests: |
+          manifests/deployment.yml
+          manifests/service.yml
+          manifests/ingress.yml
+        images: |
+          votingappjv1971.azurecr.io/aks01:${{ github.sha }}
+        imagepullsecrets: |
+          aks01dockerauth   
